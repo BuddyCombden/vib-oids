@@ -4,7 +4,7 @@ class Boid {
         this.y = y;
         this.vx = (Math.random() - 0.5) * 1;
         this.vy = (Math.random() - 0.5) * 1;
-        this.maxSpeed = 1.25; // Increased by 25%
+        this.maxSpeed = 1.5;
         this.maxForce = 0.05;
         this.type = 'boid';
         
@@ -84,9 +84,12 @@ class Void {
         this.vx = (Math.random() - 0.5) * 0.3; // Much slower than boids
         this.vy = (Math.random() - 0.5) * 0.3;
         this.maxSpeed = 0.3; // Slower max speed
-        this.maxForce = 0.02; // Gentler steering
+        this.maxForce = 0.01; // Even gentler steering (slower turning)
         this.type = 'void';
-        this.radius = 15; // Size of the void sphere (increased by 150%)
+        this.radius = 7;
+        this.maxRadius = 25; // Maximum size limit for voids
+        this.consumedBoids = 0; // Track how many boids this void has consumed
+        this.lastCollisionTime = 0; // Track when this void last collided with another max-sized void
     }
 
     // Apply a force to the void
@@ -123,9 +126,14 @@ class Void {
         ctx.beginPath();
         ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
         
-        // Create radial gradient for void
+        // Create radial gradient for void - darker center based on consumed boids
         const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, this.radius);
-        gradient.addColorStop(0, '#6A1B9A'); // Dark purple center
+        
+        // Calculate darkness based on consumed boids (darker = more consumed)
+        const darknessFactor = Math.min(this.consumedBoids * 0.1, 0.5); // Max 50% darker
+        const centerDarkness = Math.max(0.1, 0.4 - darknessFactor); // Darker center
+        
+        gradient.addColorStop(0, `rgba(74, 20, 140, ${centerDarkness})`); // Darker purple center
         gradient.addColorStop(0.7, '#8E24AA'); // Medium purple
         gradient.addColorStop(1, '#4A148C'); // Darker purple edge
         
@@ -214,16 +222,18 @@ class BoidsSimulation {
         this.boids = [];
         this.voids = [];
         this.explosions = [];
-        this.speedMultiplier = 3.0;
-        this.boidCount = 300;
-        this.voidCount = 8;
+        this.speedMultiplier = 2.0;
+        // Determine boid and void count based on screen size
+        this.adjustBoidCount();
+        //this.boidCount = 300;
+        //this.voidCount = 8;
         this.neighborRadius = 50;
         this.separationWeight = 1.5;
         this.alignmentWeight = 1.0;
         this.cohesionWeight = 1.0;
+        this.frameCount = 0; // Track frame count for collision cooldown
         
         this.resizeCanvas();
-        this.initializeEntities();
         this.setupControls();
         this.setupResizeHandler();
         this.animate();
@@ -256,9 +266,16 @@ class BoidsSimulation {
         this.canvas.height = window.innerHeight;
     }
 
+    adjustBoidCount() {
+        this.boidCount = Math.floor(window.innerWidth * window.innerHeight / 6000);
+        document.getElementById('boidCount').value = this.boidCount;
+        this.voidCount = Math.max(Math.floor(this.boidCount / 30), 2);
+    }
+
     setupResizeHandler() {
         window.addEventListener('resize', () => {
             this.resizeCanvas();
+            this.adjustBoidCount();
             this.initializeEntities();
         });
     }
@@ -268,14 +285,22 @@ class BoidsSimulation {
         const speedValue = document.getElementById('speedValue');
         const boidCountInput = document.getElementById('boidCount');
 
+        // Initialize based off the input elements
+        this.speedMultiplier = parseFloat(speedSlider.value);
+        let newCount = parseInt(boidCountInput.value);
+        if (newCount >= boidCountInput.getAttribute('min') && newCount <= boidCountInput.getAttribute('max')) {
+            this.boidCount = newCount;
+            this.initializeEntities();
+        }
+
         speedSlider.addEventListener('input', (e) => {
             this.speedMultiplier = parseFloat(e.target.value);
-            speedValue.textContent = e.target.value;
+            speedValue.textContent = String(e.target.value/e.target.max*100) + '%';
         });
 
         boidCountInput.addEventListener('change', (e) => {
             const newCount = parseInt(e.target.value);
-            if (newCount >= 10 && newCount <= 500) {
+            if (newCount >= boidCountInput.getAttribute('min') && newCount <= boidCountInput.getAttribute('max')) {
                 this.boidCount = newCount;
                 this.initializeEntities();
             }
@@ -312,25 +337,10 @@ class BoidsSimulation {
                 const dy = entity.y - void_.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance > 0 && distance < this.neighborRadius * 1.2) { // Slightly larger radius for void detection
-                    const force = 1 / distance;
-                    steerX += dx * force;
-                    steerY += dy * force;
-                    count++;
-                }
-            }
-        }
-        
-        // For voids: separate from other voids (high separation weight)
-        if (entity.type === 'void') {
-            for (let other of this.voids) {
-                if (other === entity) continue;
+                // Detection range scales with void radius - larger voids are detected from further away
+                const voidDetectionRange = this.neighborRadius * 1.2 + (void_.radius - 7) * 2; // Base range + scaling factor
                 
-                const dx = entity.x - other.x;
-                const dy = entity.y - other.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                
-                if (distance > 0 && distance < this.neighborRadius) {
+                if (distance > 0 && distance < voidDetectionRange) {
                     const force = 1 / distance;
                     steerX += dx * force;
                     steerY += dy * force;
@@ -481,6 +491,8 @@ class BoidsSimulation {
     }
 
     update() {
+        this.frameCount++;
+        
         // Update boids
         for (let i = this.boids.length - 1; i >= 0; i--) {
             const boid = this.boids[i];
@@ -518,9 +530,16 @@ class BoidsSimulation {
                 const dy = boid.y - void_.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance < void_.radius + 8) { // 8 is approximate boid size
+                if (distance < void_.radius + 8) { // 8 is approximate boid size (collision detection)
                     // Create explosion at boid position
                     this.explosions.push(new Explosion(boid.x, boid.y, boid.color));
+                    
+                    // Increase void radius and track consumed boid (respecting max size)
+                    if (void_.radius < void_.maxRadius) {
+                        void_.radius += 1;
+                    }
+                    void_.consumedBoids += 1;
+                    
                     collision = true;
                     break;
                 }
@@ -533,7 +552,9 @@ class BoidsSimulation {
         }
 
         // Update voids
-        for (let void_ of this.voids) {
+        for (let i = this.voids.length - 1; i >= 0; i--) {
+            const void_ = this.voids[i];
+            
             // Apply flocking forces
             const separation = this.separation(void_);
             const alignment = this.alignment(void_);
@@ -559,6 +580,75 @@ class BoidsSimulation {
             if (void_.x > this.canvas.width) void_.x = 0;
             if (void_.y < 0) void_.y = this.canvas.height;
             if (void_.y > this.canvas.height) void_.y = 0;
+            
+            // Check collision with other voids
+            let absorbed = false;
+            for (let j = this.voids.length - 1; j >= 0; j--) {
+                if (i === j) continue; // Skip self
+                
+                const otherVoid = this.voids[j];
+                const dx = void_.x - otherVoid.x;
+                const dy = void_.y - otherVoid.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < void_.radius + otherVoid.radius) {
+                    // Determine which void is larger
+                    if (void_.radius >= otherVoid.radius) {
+                        // Check if this void can absorb (not at max size)
+                        if (void_.radius < void_.maxRadius) {
+                            // This void absorbs the other
+                            const absorbedRadius = otherVoid.radius * 0.5; // Half of smaller void's radius
+                            const newRadius = void_.radius + absorbedRadius;
+                            
+                            // Cap the radius at maximum
+                            void_.radius = Math.min(newRadius, void_.maxRadius);
+                            void_.consumedBoids += otherVoid.consumedBoids; // Transfer consumed boids count
+                            
+                            // Create absorption effect at the smaller void's position
+                            this.explosions.push(new Explosion(otherVoid.x, otherVoid.y, { primary: '#6A1B9A', secondary: '#8E24AA' }));
+                            
+                            // Remove the smaller void
+                            this.voids.splice(j, 1);
+                            if (j < i) i--; // Adjust index since we removed an element
+                        }
+                        // If at max size, no absorption occurs - trigger spiral and launch
+                        else if (void_.radius >= void_.maxRadius && otherVoid.radius >= otherVoid.maxRadius) {
+                            // Check collision cooldown to prevent getting stuck
+                            const cooldownFrames = 60; // 1 second at 60fps
+                            if (this.frameCount - void_.lastCollisionTime > cooldownFrames && 
+                                this.frameCount - otherVoid.lastCollisionTime > cooldownFrames) {
+                                // Both voids are at max size - spiral and launch away
+                                this.spiralAndLaunch(void_, otherVoid);
+                                void_.lastCollisionTime = this.frameCount;
+                                otherVoid.lastCollisionTime = this.frameCount;
+                            }
+                        }
+                    } else {
+                        // This void gets absorbed by the other (if the other can absorb)
+                        if (otherVoid.radius < otherVoid.maxRadius) {
+                            absorbed = true;
+                            break;
+                        }
+                        // If the larger void is at max size, no absorption occurs - trigger spiral and launch
+                        else if (void_.radius >= void_.maxRadius && otherVoid.radius >= otherVoid.maxRadius) {
+                            // Check collision cooldown to prevent getting stuck
+                            const cooldownFrames = 60; // 1 second at 60fps
+                            if (this.frameCount - void_.lastCollisionTime > cooldownFrames && 
+                                this.frameCount - otherVoid.lastCollisionTime > cooldownFrames) {
+                                // Both voids are at max size - spiral and launch away
+                                this.spiralAndLaunch(void_, otherVoid);
+                                void_.lastCollisionTime = this.frameCount;
+                                otherVoid.lastCollisionTime = this.frameCount;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Remove this void if it was absorbed
+            if (absorbed) {
+                this.voids.splice(i, 1);
+            }
         }
         
         // Update explosions
@@ -595,6 +685,44 @@ class BoidsSimulation {
         this.update();
         this.draw();
         requestAnimationFrame(() => this.animate());
+    }
+
+    spiralAndLaunch(void1, void2) {
+        // Calculate center point between the two voids
+        const centerX = (void1.x + void2.x) / 2;
+        const centerY = (void1.y + void2.y) / 2;
+        
+        // Calculate distance between voids
+        const dx = void2.x - void1.x;
+        const dy = void2.y - void1.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Create spiral effect by applying tangential forces
+        const angle = Math.atan2(dy, dx);
+        const tangentialAngle = angle + Math.PI / 2; // Perpendicular to line between voids
+        
+        // Apply spiral forces (opposite directions for each void)
+        const spiralForce = 2.0;
+        void1.vx += Math.cos(tangentialAngle) * spiralForce;
+        void1.vy += Math.sin(tangentialAngle) * spiralForce;
+        void2.vx += Math.cos(tangentialAngle + Math.PI) * spiralForce; // Opposite direction
+        void2.vy += Math.sin(tangentialAngle + Math.PI) * spiralForce;
+        
+        // Apply repulsion force to launch them apart
+        const repulsionForce = 5.0; // Much stronger repulsion
+        const repulsionAngle = angle; // Away from each other
+        void1.vx += Math.cos(repulsionAngle) * repulsionForce;
+        void1.vy += Math.sin(repulsionAngle) * repulsionForce;
+        void2.vx += Math.cos(repulsionAngle + Math.PI) * repulsionForce; // Opposite direction
+        void2.vy += Math.sin(repulsionAngle + Math.PI) * repulsionForce;
+        
+        // Create explosion effect at the collision point
+        this.explosions.push(new Explosion(centerX, centerY, { primary: '#6A1B9A', secondary: '#8E24AA' }));
+        
+        // Add a second explosion effect for dramatic impact
+        setTimeout(() => {
+            this.explosions.push(new Explosion(centerX, centerY, { primary: '#4A148C', secondary: '#6A1B9A' }));
+        }, 100);
     }
 }
 
