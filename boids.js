@@ -7,6 +7,9 @@ class Boid {
         this.maxSpeed = 1.5;
         this.maxForce = 0.05;
         this.type = 'boid';
+        this.size = 1.0; // Base size multiplier
+        this.maxSize = 4; // Maximum size limit for boids
+        this.detectionRange = 1.0; // Base detection range multiplier
         
         // Random color for each boid (no purple to avoid confusion with voids)
         const colors = [
@@ -55,11 +58,11 @@ class Boid {
         ctx.translate(this.x, this.y);
         ctx.rotate(angle);
         
-        // Draw boid as a triangle
+        // Draw boid as a triangle (scaled by size multiplier)
         ctx.beginPath();
-        ctx.moveTo(8, 0);
-        ctx.lineTo(-4, -3);
-        ctx.lineTo(-4, 3);
+        ctx.moveTo(8 * this.size, 0);
+        ctx.lineTo(-4 * this.size, -3 * this.size);
+        ctx.lineTo(-4 * this.size, 3 * this.size);
         ctx.closePath();
         
         // Create gradient for boid using random color
@@ -323,7 +326,7 @@ class BoidsSimulation {
                 const dy = entity.y - other.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance > 0 && distance < this.neighborRadius) {
+                if (distance > 0 && distance < this.neighborRadius * entity.detectionRange) {
                     const force = 1 / distance;
                     steerX += dx * force;
                     steerY += dy * force;
@@ -366,7 +369,7 @@ class BoidsSimulation {
                         const dx = entity.x - void_.x;
                         const dy = entity.y - void_.y;
                         const distance = Math.sqrt(dx * dx + dy * dy);
-                        if (distance > 0 && distance < this.neighborRadius * 1.2) {
+                        if (distance > 0 && distance < this.neighborRadius * entity.detectionRange * 1.2) {
                             hasVoidSeparation = true;
                             break;
                         }
@@ -397,7 +400,7 @@ class BoidsSimulation {
                 const dy = entity.y - other.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance > 0 && distance < this.neighborRadius) {
+                if (distance > 0 && distance < this.neighborRadius * entity.detectionRange) {
                     avgVx += other.vx;
                     avgVy += other.vy;
                     count++;
@@ -411,7 +414,7 @@ class BoidsSimulation {
                 const dy = entity.y - other.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance > 0 && distance < this.neighborRadius) {
+                if (distance > 0 && distance < this.neighborRadius * entity.detectionRange) {
                     avgVx += other.vx;
                     avgVy += other.vy;
                     count++;
@@ -448,7 +451,7 @@ class BoidsSimulation {
                 const dy = entity.y - other.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance > 0 && distance < this.neighborRadius) {
+                if (distance > 0 && distance < this.neighborRadius * entity.detectionRange) {
                     centerX += other.x;
                     centerY += other.y;
                     count++;
@@ -524,29 +527,64 @@ class BoidsSimulation {
             if (boid.y > this.canvas.height) boid.y = 0;
             
             // Check collision with voids
-            let collision = false;
+            let voidCollision = false;
             for (let void_ of this.voids) {
                 const dx = boid.x - void_.x;
                 const dy = boid.y - void_.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 
-                if (distance < void_.radius + 8) { // 8 is approximate boid size (collision detection)
+                if (distance < void_.radius + 8 * boid.size) { // Scale collision detection with boid size
                     // Create explosion at boid position
                     this.explosions.push(new Explosion(boid.x, boid.y, boid.color));
                     
-                    // Increase void radius and track consumed boid (respecting max size)
+                    // Handle void absorption based on current size
                     if (void_.radius < void_.maxRadius) {
-                        void_.radius += 1;
+                        // Normal absorption - increase radius by boid size
+                        void_.radius = Math.min(void_.radius + boid.size, void_.maxRadius);
+                        void_.consumedBoids += 1;
+                    } else {
+                        // Void is at max size - reset and release new boids
+                        const sizeLost = void_.radius - 7; // Calculate how much size was lost
+                        void_.radius = 7; // Reset to default size
+                        void_.consumedBoids = 0; // Reset consumed boids count
+                        
+                        // Create new boids in a circle around the void
+                        this.createBoidsFromVoid(void_, sizeLost);
                     }
-                    void_.consumedBoids += 1;
                     
-                    collision = true;
+                    voidCollision = true;
                     break;
                 }
             }
             
-            // Remove boid if collision occurred
-            if (collision) {
+            // Check collision with other boids of same color
+            let boidCombined = false;
+            if (!voidCollision) {
+                for (let j = this.boids.length - 1; j > i; j--) {
+                    const otherBoid = this.boids[j];
+                    
+                    // Check if same color and not at max size
+                    if (boid.color.primary === otherBoid.color.primary && 
+                        boid.size < boid.maxSize && otherBoid.size < otherBoid.maxSize) {
+                        const dx = boid.x - otherBoid.x;
+                        const dy = boid.y - otherBoid.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        
+                        // Collision detection based on boid sizes
+                        const collisionDistance = (8 * boid.size + 8 * otherBoid.size) * 0.8; // 80% of combined size
+                        
+                        if (distance < collisionDistance) {
+                            // Combine boids
+                            this.combineBoids(boid, otherBoid, i, j);
+                            boidCombined = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Remove boid if void collision occurred
+            if (voidCollision) {
                 this.boids.splice(i, 1);
             }
         }
@@ -614,7 +652,7 @@ class BoidsSimulation {
                         // If at max size, no absorption occurs - trigger spiral and launch
                         else if (void_.radius >= void_.maxRadius && otherVoid.radius >= otherVoid.maxRadius) {
                             // Check collision cooldown to prevent getting stuck
-                            const cooldownFrames = 60; // 1 second at 60fps
+                            const cooldownFrames = 90; // 1 second at 60fps
                             if (this.frameCount - void_.lastCollisionTime > cooldownFrames && 
                                 this.frameCount - otherVoid.lastCollisionTime > cooldownFrames) {
                                 // Both voids are at max size - spiral and launch away
@@ -687,6 +725,83 @@ class BoidsSimulation {
         requestAnimationFrame(() => this.animate());
     }
 
+    combineBoids(boid1, boid2, index1, index2) {
+        // Calculate center point between the two boids
+        const centerX = (boid1.x + boid2.x) / 2;
+        const centerY = (boid1.y + boid2.y) / 2;
+        
+        // Calculate average velocity
+        const avgVx = (boid1.vx + boid2.vx) / 2;
+        const avgVy = (boid1.vy + boid2.vy) / 2;
+        
+        // Create new combined boid with enhanced properties
+        const combinedBoid = new Boid(centerX, centerY);
+        combinedBoid.color = boid1.color; // Keep the same color
+        combinedBoid.size = Math.min(boid1.size + 1, boid1.maxSize); // Increase size by 1, cap at max
+        combinedBoid.maxSpeed = boid1.maxSpeed * 1.1; // Increase speed by 10%
+        combinedBoid.detectionRange = 1.0 + (combinedBoid.size - 1) * 0.5; // Base + (size-1) * 0.5
+        combinedBoid.vx = avgVx;
+        combinedBoid.vy = avgVy;
+        
+        // Create combination effect
+        this.explosions.push(new Explosion(centerX, centerY, boid1.color));
+        
+        // Replace the first boid with the combined one
+        this.boids[index1] = combinedBoid;
+        
+        // Remove the second boid
+        this.boids.splice(index2, 1);
+    }
+
+    createBoidsFromVoid(void_, sizeLost) {
+        // Boid colors array (same as in Boid constructor)
+        const colors = [
+            { primary: '#4CAF50', secondary: '#81C784', stroke: '#2E7D32' }, // Green
+            { primary: '#2196F3', secondary: '#64B5F6', stroke: '#1976D2' }, // Blue
+            { primary: '#FF9800', secondary: '#FFB74D', stroke: '#F57C00' }, // Orange
+            { primary: '#E91E63', secondary: '#F06292', stroke: '#C2185B' }, // Pink
+            { primary: '#00BCD4', secondary: '#4DD0E1', stroke: '#0097A7' }, // Cyan
+            { primary: '#FF5722', secondary: '#FF8A65', stroke: '#D84315' }, // Red-Orange
+            { primary: '#795548', secondary: '#A1887F', stroke: '#5D4037' }, // Brown
+            { primary: '#FFC107', secondary: '#FFD54F', stroke: '#FF8F00' }  // Amber
+        ];
+        
+        // Purple color for one of the new boids
+        const purpleColor = { primary: '#9C27B0', secondary: '#BA68C8', stroke: '#7B1FA2' };
+        
+        // Create boids in a circle around the void
+        const numBoids = Math.floor(sizeLost);
+        const radius = 30; // Distance from void center
+        
+        for (let i = 0; i < numBoids; i++) {
+            // Calculate position in circle
+            const angle = (Math.PI * 2 * i) / numBoids;
+            const x = void_.x + Math.cos(angle) * radius;
+            const y = void_.y + Math.sin(angle) * radius;
+            
+            // Create new boid
+            const newBoid = new Boid(x, y);
+            
+            // Set color - one purple, rest random
+            if (i === 0) {
+                newBoid.color = purpleColor;
+            } else {
+                newBoid.color = colors[Math.floor(Math.random() * colors.length)];
+            }
+            
+            // Set velocity facing away from void
+            const velocityMagnitude = 2.0;
+            newBoid.vx = Math.cos(angle) * velocityMagnitude;
+            newBoid.vy = Math.sin(angle) * velocityMagnitude;
+            
+            // Add to boids array
+            this.boids.push(newBoid);
+        }
+        
+        // Create explosion effect at void position
+        this.explosions.push(new Explosion(void_.x, void_.y, { primary: '#6A1B9A', secondary: '#8E24AA' }));
+    }
+
     spiralAndLaunch(void1, void2) {
         // Calculate center point between the two voids
         const centerX = (void1.x + void2.x) / 2;
@@ -702,14 +817,14 @@ class BoidsSimulation {
         const tangentialAngle = angle + Math.PI / 2; // Perpendicular to line between voids
         
         // Apply spiral forces (opposite directions for each void)
-        const spiralForce = 2.0;
+        const spiralForce = 3.0;
         void1.vx += Math.cos(tangentialAngle) * spiralForce;
         void1.vy += Math.sin(tangentialAngle) * spiralForce;
         void2.vx += Math.cos(tangentialAngle + Math.PI) * spiralForce; // Opposite direction
         void2.vy += Math.sin(tangentialAngle + Math.PI) * spiralForce;
         
         // Apply repulsion force to launch them apart
-        const repulsionForce = 5.0; // Much stronger repulsion
+        const repulsionForce = 7.0; // Much stronger repulsion
         const repulsionAngle = angle; // Away from each other
         void1.vx += Math.cos(repulsionAngle) * repulsionForce;
         void1.vy += Math.sin(repulsionAngle) * repulsionForce;
