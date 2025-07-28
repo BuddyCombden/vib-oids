@@ -8,16 +8,16 @@ class Boid {
         this.maxForce = 0.05;
         this.type = 'boid';
         
-        // Random color for each boid
+        // Random color for each boid (no purple to avoid confusion with voids)
         const colors = [
             { primary: '#4CAF50', secondary: '#81C784', stroke: '#2E7D32' }, // Green
             { primary: '#2196F3', secondary: '#64B5F6', stroke: '#1976D2' }, // Blue
             { primary: '#FF9800', secondary: '#FFB74D', stroke: '#F57C00' }, // Orange
             { primary: '#E91E63', secondary: '#F06292', stroke: '#C2185B' }, // Pink
-            { primary: '#9C27B0', secondary: '#BA68C8', stroke: '#7B1FA2' }, // Purple
             { primary: '#00BCD4', secondary: '#4DD0E1', stroke: '#0097A7' }, // Cyan
             { primary: '#FF5722', secondary: '#FF8A65', stroke: '#D84315' }, // Red-Orange
-            { primary: '#795548', secondary: '#A1887F', stroke: '#5D4037' }  // Brown
+            { primary: '#795548', secondary: '#A1887F', stroke: '#5D4037' }, // Brown
+            { primary: '#FFC107', secondary: '#FFD54F', stroke: '#FF8F00' }  // Amber
         ];
         this.color = colors[Math.floor(Math.random() * colors.length)];
     }
@@ -86,7 +86,7 @@ class Void {
         this.maxSpeed = 0.3; // Slower max speed
         this.maxForce = 0.02; // Gentler steering
         this.type = 'void';
-        this.radius = 6; // Size of the void sphere
+        this.radius = 15; // Size of the void sphere (increased by 150%)
     }
 
     // Apply a force to the void
@@ -143,12 +143,77 @@ class Void {
     }
 }
 
+class Explosion {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.particles = [];
+        this.life = 30; // Frames the explosion lasts
+        this.maxLife = 30;
+        
+        // Create explosion particles
+        for (let i = 0; i < 12; i++) {
+            const angle = (Math.PI * 2 * i) / 12;
+            const speed = 2 + Math.random() * 3;
+            this.particles.push({
+                x: x,
+                y: y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                life: this.life,
+                maxLife: this.life,
+                color: color
+            });
+        }
+    }
+    
+    update() {
+        this.life--;
+        for (let particle of this.particles) {
+            particle.x += particle.vx;
+            particle.y += particle.vy;
+            particle.vx *= 0.95; // Slow down
+            particle.vy *= 0.95;
+            particle.life--;
+        }
+    }
+    
+    draw(ctx) {
+        const alpha = this.life / this.maxLife;
+        for (let particle of this.particles) {
+            const particleAlpha = particle.life / particle.maxLife;
+            ctx.save();
+            ctx.globalAlpha = alpha * particleAlpha;
+            
+            // Draw particle as a small circle
+            ctx.beginPath();
+            ctx.arc(particle.x, particle.y, 3, 0, Math.PI * 2);
+            ctx.fillStyle = particle.color.primary;
+            ctx.fill();
+            
+            // Add glow effect
+            ctx.shadowColor = particle.color.primary;
+            ctx.shadowBlur = 8;
+            ctx.strokeStyle = particle.color.secondary;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            
+            ctx.restore();
+        }
+    }
+    
+    isDead() {
+        return this.life <= 0;
+    }
+}
+
 class BoidsSimulation {
     constructor() {
         this.canvas = document.getElementById('boidsCanvas');
         this.ctx = this.canvas.getContext('2d');
         this.boids = [];
         this.voids = [];
+        this.explosions = [];
         this.speedMultiplier = 3.0;
         this.boidCount = 300;
         this.voidCount = 8;
@@ -167,6 +232,7 @@ class BoidsSimulation {
     initializeEntities() {
         this.boids = [];
         this.voids = [];
+        this.explosions = [];
         
         // Initialize boids
         for (let i = 0; i < this.boidCount; i++) {
@@ -416,7 +482,9 @@ class BoidsSimulation {
 
     update() {
         // Update boids
-        for (let boid of this.boids) {
+        for (let i = this.boids.length - 1; i >= 0; i--) {
+            const boid = this.boids[i];
+            
             // Apply flocking forces
             const separation = this.separation(boid);
             const alignment = this.alignment(boid);
@@ -442,6 +510,26 @@ class BoidsSimulation {
             if (boid.x > this.canvas.width) boid.x = 0;
             if (boid.y < 0) boid.y = this.canvas.height;
             if (boid.y > this.canvas.height) boid.y = 0;
+            
+            // Check collision with voids
+            let collision = false;
+            for (let void_ of this.voids) {
+                const dx = boid.x - void_.x;
+                const dy = boid.y - void_.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < void_.radius + 8) { // 8 is approximate boid size
+                    // Create explosion at boid position
+                    this.explosions.push(new Explosion(boid.x, boid.y, boid.color));
+                    collision = true;
+                    break;
+                }
+            }
+            
+            // Remove boid if collision occurred
+            if (collision) {
+                this.boids.splice(i, 1);
+            }
         }
 
         // Update voids
@@ -472,6 +560,14 @@ class BoidsSimulation {
             if (void_.y < 0) void_.y = this.canvas.height;
             if (void_.y > this.canvas.height) void_.y = 0;
         }
+        
+        // Update explosions
+        for (let i = this.explosions.length - 1; i >= 0; i--) {
+            this.explosions[i].update();
+            if (this.explosions[i].isDead()) {
+                this.explosions.splice(i, 1);
+            }
+        }
     }
 
     draw() {
@@ -487,6 +583,11 @@ class BoidsSimulation {
         // Draw all voids
         for (let void_ of this.voids) {
             void_.draw(this.ctx);
+        }
+        
+        // Draw all explosions
+        for (let explosion of this.explosions) {
+            explosion.draw(this.ctx);
         }
     }
 
